@@ -7,6 +7,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.awt.Desktop;
 import java.net.URI;
 import java.net.URL;
 import java.net.http.HttpClient;
@@ -17,9 +18,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.UUID;
+import javax.swing.JOptionPane;
 
 public final class AuthlyX {
   public static final class ResponseStruct {
@@ -49,7 +55,20 @@ public final class AuthlyX {
     public String VarValue = "";
   }
 
+  public static final class UpdateData {
+    public boolean Available = false;
+    public String LatestVersion = "";
+    public String DownloadUrl = "";
+    public boolean AutoUpdateEnabled = false;
+    public boolean ForceUpdate = false;
+    public String Changelog = "";
+    public boolean ShowReminder = false;
+    public String ReminderMessage = "";
+    public String AllowedUntil = "";
+  }
+
   private static final Gson GSON = new Gson();
+  private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
   private final HttpClient http;
   private final String ownerId;
@@ -62,6 +81,7 @@ public final class AuthlyX {
   public final ResponseStruct response = new ResponseStruct();
   public final UserData userData = new UserData();
   public final VariableData variableData = new VariableData();
+  public final UpdateData updateData = new UpdateData();
 
   private boolean initialized = false;
   private String sessionId = "";
@@ -111,6 +131,7 @@ public final class AuthlyX {
     String sid = getAsString(obj, "session_id");
     if (sid != null && !sid.isBlank()) this.sessionId = sid;
     this.initialized = response.success && !this.sessionId.isBlank();
+    promptUpdateIfNeeded("UPDATE_REQUIRED".equalsIgnoreCase(response.code));
     return this.initialized;
   }
 
@@ -352,6 +373,14 @@ public final class AuthlyX {
   private JsonObject postJson(String route, JsonObject payload) {
     resetResponse();
 
+    String requestId = UUID.randomUUID().toString();
+    String nonce = randomHex(16);
+    long timestamp = System.currentTimeMillis();
+
+    payload.addProperty("request_id", requestId);
+    payload.addProperty("nonce", nonce);
+    payload.addProperty("timestamp", timestamp);
+
     String url = apiBase + "/" + route;
     String body = GSON.toJson(payload);
 
@@ -361,6 +390,9 @@ public final class AuthlyX {
       .uri(URI.create(url))
       .timeout(Duration.ofSeconds(25))
       .header("Content-Type", "application/json")
+      .header("x-request-id", requestId)
+      .header("x-auth-nonce", nonce)
+      .header("x-auth-timestamp", String.valueOf(timestamp))
       .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
       .build();
 
@@ -384,6 +416,7 @@ public final class AuthlyX {
 
       loadUserData(obj);
       loadVariableData(obj);
+      loadUpdateData(obj);
 
       return obj;
     } catch (Exception ex) {
@@ -453,6 +486,171 @@ public final class AuthlyX {
     if (v == null) return;
     variableData.VarKey = Objects.toString(getAsString(v, "var_key"), "");
     variableData.VarValue = Objects.toString(getAsString(v, "var_value"), "");
+  }
+
+  private void loadUpdateData(JsonObject obj) {
+    JsonObject update = obj.has("update") && obj.get("update").isJsonObject() ? obj.getAsJsonObject("update") : null;
+    if (update == null) {
+      if (obj.has("auto_update_enabled") || obj.has("auto_update_download_url")) {
+        updateData.Available = true;
+        updateData.LatestVersion = Objects.toString(getAsString(obj, "server_version"), Objects.toString(getAsString(obj, "version"), ""));
+        updateData.AutoUpdateEnabled = getAsBool(obj, "auto_update_enabled");
+        updateData.DownloadUrl = Objects.toString(getAsString(obj, "auto_update_download_url"), "");
+        updateData.ForceUpdate = getAsBool(obj, "force_update");
+      }
+      return;
+    }
+
+    updateData.Available = getAsBool(update, "available");
+    updateData.LatestVersion = Objects.toString(getAsString(update, "latest_version"), "");
+    updateData.AutoUpdateEnabled = getAsBool(update, "auto_update_enabled");
+    updateData.DownloadUrl = Objects.toString(getAsString(update, "download_url"), "");
+    updateData.ForceUpdate = getAsBool(update, "force_update");
+    updateData.Changelog = Objects.toString(getAsString(update, "changelog"), "");
+    updateData.ShowReminder = getAsBool(update, "show_reminder");
+    updateData.ReminderMessage = Objects.toString(getAsString(update, "reminder_message"), "");
+    updateData.AllowedUntil = Objects.toString(getAsString(update, "allowed_until"), "");
+  }
+
+  private int[] parseSemverParts(String value) {
+    String s = value == null ? "" : value.trim();
+    int dash = s.indexOf('-');
+    if (dash >= 0) s = s.substring(0, dash);
+    String[] pieces = s.split("\\.");
+    int[] out = new int[] { 0, 0, 0 };
+    for (int i = 0; i < out.length && i < pieces.length; i++) {
+      try {
+        out[i] = Integer.parseInt(pieces[i].replaceAll("[^0-9].*$", ""));
+      } catch (Exception ignored) {
+        out[i] = 0;
+      }
+    }
+    return out;
+  }
+
+  private int compareSemver(String current, String latest) {
+    int[] a = parseSemverParts(current);
+    int[] b = parseSemverParts(latest);
+    for (int i = 0; i < 3; i++) {
+      if (a[i] < b[i]) return -1;
+      if (a[i] > b[i]) return 1;
+    }
+    return 0;
+  }
+
+  private boolean isClientOutdated() {
+    return !updateData.LatestVersion.isBlank() && compareSemver(version, updateData.LatestVersion) < 0;
+  }
+
+  private boolean hasWhitelistedUpdateMessage() {
+    return updateData.ShowReminder || !updateData.AllowedUntil.isBlank();
+  }
+
+  private boolean isAutoUpdateEnabled() {
+    return updateData.AutoUpdateEnabled;
+  }
+
+  private boolean shouldShowUpdatePrompt(boolean forceShow) {
+    if (!updateData.Available) return false;
+    if (forceShow) return true;
+    if (!isClientOutdated()) return false;
+    return hasWhitelistedUpdateMessage();
+  }
+
+  private String formatDisplayDate(String rawDate) {
+    if (rawDate == null || rawDate.isBlank()) return "";
+    try {
+      return OffsetDateTime.parse(rawDate).format(DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US));
+    } catch (Exception ignored) {
+      return rawDate;
+    }
+  }
+
+  private String buildWhitelistedUpdateMessage() {
+    String base = !updateData.AllowedUntil.isBlank()
+      ? "A new version is ready, and you can keep using this build until " + formatDisplayDate(updateData.AllowedUntil) + "."
+      : "A new version is ready, and you can still use this build for now.";
+
+    if (!isAutoUpdateEnabled()) return base;
+    return base + System.lineSeparator() + System.lineSeparator() + "Would you like to download the latest version now?";
+  }
+
+  private void openUrl(String url) {
+    String target = url == null ? "" : url.trim();
+    if (target.isBlank()) return;
+    try {
+      if (Desktop.isDesktopSupported()) {
+        Desktop.getDesktop().browse(URI.create(target));
+      }
+    } catch (Exception ignored) {
+    }
+  }
+
+  private void showRequiredUpdateConsole() {
+    String message = response.message == null || response.message.isBlank()
+      ? "Please update your app to the latest version."
+      : response.message;
+    System.out.println(message);
+    if (!updateData.LatestVersion.isBlank()) {
+      System.out.println("Latest version: " + updateData.LatestVersion);
+    }
+    if (!isAutoUpdateEnabled() || updateData.DownloadUrl.isBlank()) return;
+
+    System.out.println("1. Download Latest");
+    System.out.println("2. Exit");
+
+    try {
+      if (System.console() == null) return;
+      BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+      System.out.print("Select an option (1 or 2): ");
+      String choice = reader.readLine();
+      if ("1".equals(choice == null ? "" : choice.trim())) {
+        openUrl(updateData.DownloadUrl);
+      }
+    } catch (Exception ignored) {
+    }
+  }
+
+  private boolean tryShowMessageBox(String message, boolean yesNo) {
+    try {
+      if (yesNo) {
+        int result = JOptionPane.showConfirmDialog(null, message, "AuthlyX Update", JOptionPane.YES_NO_OPTION, JOptionPane.INFORMATION_MESSAGE);
+        if (result == JOptionPane.YES_OPTION && isAutoUpdateEnabled() && !updateData.DownloadUrl.isBlank()) {
+          openUrl(updateData.DownloadUrl);
+        }
+      } else {
+        JOptionPane.showMessageDialog(null, message, "AuthlyX Update", JOptionPane.INFORMATION_MESSAGE);
+      }
+      return true;
+    } catch (Exception ignored) {
+      return false;
+    }
+  }
+
+  private void promptUpdateIfNeeded(boolean forceShow) {
+    if (!shouldShowUpdatePrompt(forceShow)) return;
+
+    if (forceShow) {
+      showRequiredUpdateConsole();
+      return;
+    }
+
+    String message = buildWhitelistedUpdateMessage();
+    boolean useDownloadPrompt = isAutoUpdateEnabled() && !updateData.DownloadUrl.isBlank();
+    if (tryShowMessageBox(message, useDownloadPrompt)) return;
+
+    System.out.println(message);
+    if (!useDownloadPrompt || System.console() == null) return;
+    try {
+      BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+      System.out.print("Download the latest version now? (Y/N): ");
+      String choice = reader.readLine();
+      String answer = choice == null ? "" : choice.trim().toLowerCase(Locale.ROOT);
+      if ("y".equals(answer) || "yes".equals(answer)) {
+        openUrl(updateData.DownloadUrl);
+      }
+    } catch (Exception ignored) {
+    }
   }
 
   private boolean ensureInitialized() {
@@ -558,6 +756,14 @@ public final class AuthlyX {
     } catch (Exception ignored) {
       return "UNKNOWN_HASH";
     }
+  }
+
+  private static String randomHex(int byteCount) {
+    byte[] bytes = new byte[Math.max(1, byteCount)];
+    SECURE_RANDOM.nextBytes(bytes);
+    StringBuilder sb = new StringBuilder(bytes.length * 2);
+    for (byte b : bytes) sb.append(String.format("%02x", b));
+    return sb.toString();
   }
 
   private static String nvl(String s) {

@@ -2,12 +2,12 @@ import java.util.Scanner;
 
 public final class Main {
   public static AuthlyX AuthlyXApp = new AuthlyX(
-    "12345678",
-    "HI",
-    "1.3",
-    "qIBFoBJWQH4jaOZr6Sf8BJZyEVnT0LiN4QfRxJGn",
+    envOrDefault("AUTHLYX_OWNER_ID", "b49d11af8c42"),
+    envOrDefault("AUTHLYX_APP_NAME", "TEST"),
+    envOrDefault("AUTHLYX_VERSION", "1.3"),
+    envOrDefault("AUTHLYX_SECRET", "1L0edLKqHlFv0AL3NIQ7uPpikN2ECr7aZSHrNWMo"),
     true,
-    "https://authly.cc/api/v2"
+    envOrDefault("AUTHLYX_API", "https://authly.cc/api/v2")
   );
 
   public static void main(String[] args) {
@@ -136,5 +136,9 @@ public final class Main {
     } catch (Exception ignored) {
     }
   }
-}
 
+  private static String envOrDefault(String name, String fallback) {
+    String value = System.getenv(name);
+    return (value == null || value.isBlank()) ? fallback : value;
+  }
+}
