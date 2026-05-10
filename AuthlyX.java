@@ -1,3 +1,4 @@
+// AuthlyX SDK Version 2.1
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -18,10 +19,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
+import java.security.KeyFactory;
+import java.security.PublicKey;
 import java.security.SecureRandom;
+import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
@@ -69,6 +78,7 @@ public final class AuthlyX {
 
   private static final Gson GSON = new Gson();
   private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+  private static final String DEFAULT_SERVER_PUBLIC_KEY_DER_BASE64 = "MCowBQYDK2VwAyEAgX5lXPhkadeQozyudzTxDXopdJxYexD5qZ0yEq9UOMU=";
 
   private final HttpClient http;
   private final String ownerId;
@@ -77,6 +87,8 @@ public final class AuthlyX {
   private final String secret;
   private final String apiBase;
   private final boolean debug;
+  private final String serverPublicKeyDerBase64;
+  private final boolean requireSignedResponses;
 
   public final ResponseStruct response = new ResponseStruct();
   public final UserData userData = new UserData();
@@ -99,6 +111,8 @@ public final class AuthlyX {
     this.version = version == null ? "" : version.trim();
     this.secret = secret == null ? "" : secret.trim();
     this.debug = debug;
+    this.serverPublicKeyDerBase64 = DEFAULT_SERVER_PUBLIC_KEY_DER_BASE64;
+    this.requireSignedResponses = false;
     this.apiBase = (apiBase == null || apiBase.trim().isEmpty())
       ? "https://authly.cc/api/v2"
       : apiBase.trim().replaceAll("/+$", "");
@@ -405,6 +419,13 @@ public final class AuthlyX {
       response.statusCode = resp.statusCode();
 
       JsonObject obj = JsonParser.parseString(respBody).getAsJsonObject();
+      if (!verifySignedResponse(resp, requestId, nonce, canonicalJson(obj))) {
+        setFailure("AUTH_INVALID_SIGNATURE", "Response signature verification failed.");
+        response.raw = respBody;
+        response.statusCode = resp.statusCode();
+        return null;
+      }
+
       response.success = getAsBool(obj, "success");
       response.message = Objects.toString(getAsString(obj, "message"), "");
       response.code = Objects.toString(getAsString(obj, "code"), "");
@@ -422,6 +443,44 @@ public final class AuthlyX {
     } catch (Exception ex) {
       return setFailure("NETWORK_ERROR", ex.getMessage() == null ? "Network error" : ex.getMessage()) ? null : null;
     }
+  }
+
+  private boolean verifySignedResponse(HttpResponse<String> resp, String requestId, String nonce, String canonicalBody) {
+    String signatureValue = resp.headers().firstValue("x-v2-signature")
+      .orElse(resp.headers().firstValue("x-auth-signature").orElse(""));
+    String signatureTs = resp.headers().firstValue("x-v2-signature-ts").orElse("");
+    if (signatureValue.isBlank() || signatureTs.isBlank()) return !requireSignedResponses;
+    if (serverPublicKeyDerBase64.isBlank()) return !requireSignedResponses;
+
+    try {
+      byte[] keyBytes = Base64.getDecoder().decode(serverPublicKeyDerBase64);
+      PublicKey publicKey = KeyFactory.getInstance("Ed25519").generatePublic(new X509EncodedKeySpec(keyBytes));
+      Signature verifier = Signature.getInstance("Ed25519");
+      verifier.initVerify(publicKey);
+      String payload = signatureTs + "\n" + requestId + "\n" + nonce + "\n" + canonicalBody;
+      verifier.update(payload.getBytes(StandardCharsets.UTF_8));
+      return verifier.verify(Base64.getDecoder().decode(signatureValue));
+    } catch (Exception ex) {
+      return false;
+    }
+  }
+
+  private String canonicalJson(JsonElement element) {
+    if (element == null || element.isJsonNull()) return "null";
+    if (element.isJsonPrimitive()) return GSON.toJson(element);
+    if (element.isJsonArray()) {
+      List<String> values = new ArrayList<>();
+      element.getAsJsonArray().forEach(item -> values.add(canonicalJson(item)));
+      return "[" + String.join(",", values) + "]";
+    }
+    JsonObject object = element.getAsJsonObject();
+    List<String> keys = new ArrayList<>(object.keySet());
+    Collections.sort(keys);
+    List<String> pairs = new ArrayList<>();
+    for (String key : keys) {
+      pairs.add(GSON.toJson(key) + ":" + canonicalJson(object.get(key)));
+    }
+    return "{" + String.join(",", pairs) + "}";
   }
 
   private void loadUserData(JsonObject obj) {
