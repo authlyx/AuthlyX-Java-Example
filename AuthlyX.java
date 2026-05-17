@@ -112,7 +112,7 @@ public final class AuthlyX {
     this.secret = secret == null ? "" : secret.trim();
     this.debug = debug;
     this.serverPublicKeyDerBase64 = DEFAULT_SERVER_PUBLIC_KEY_DER_BASE64;
-    this.requireSignedResponses = false;
+    this.requireSignedResponses = true;
     this.apiBase = (apiBase == null || apiBase.trim().isEmpty())
       ? "https://authly.cc/api/v2"
       : apiBase.trim().replaceAll("/+$", "");
