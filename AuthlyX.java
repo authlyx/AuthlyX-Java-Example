@@ -1,14 +1,17 @@
-// AuthlyX SDK Version 2.1
+// AuthlyX SDK Version 2.2
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.awt.Desktop;
+import java.net.InetAddress;
+import java.net.Proxy;
 import java.net.URI;
 import java.net.URL;
 import java.net.http.HttpClient;
@@ -23,9 +26,12 @@ import java.security.KeyFactory;
 import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.Signature;
+import java.security.cert.X509Certificate;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -34,6 +40,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.*;
+import javax.net.ssl.*;
 import javax.swing.JOptionPane;
 
 public final class AuthlyX {
@@ -98,6 +106,7 @@ public final class AuthlyX {
   private boolean initialized = false;
   private String sessionId = "";
   private String applicationHash = "";
+  private String originalHash = "";
   private String cachedPublicIp = "";
   private long cachedPublicIpExpiresAtMs = 0;
 
@@ -116,9 +125,8 @@ public final class AuthlyX {
     this.apiBase = (apiBase == null || apiBase.trim().isEmpty())
       ? "https://authly.cc/api/v2"
       : apiBase.trim().replaceAll("/+$", "");
-    this.http = HttpClient.newBuilder()
-      .connectTimeout(Duration.ofSeconds(10))
-      .build();
+    this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    checkDebugger();
   }
 
   public boolean Init() {
@@ -131,6 +139,7 @@ public final class AuthlyX {
     }
 
     this.applicationHash = getCurrentApplicationHash();
+    this.originalHash = this.applicationHash;
 
     JsonObject payload = new JsonObject();
     payload.addProperty("owner_id", ownerId);
@@ -145,6 +154,10 @@ public final class AuthlyX {
     String sid = getAsString(obj, "session_id");
     if (sid != null && !sid.isBlank()) this.sessionId = sid;
     this.initialized = response.success && !this.sessionId.isBlank();
+    if (this.initialized) {
+      startIntegrityHeartbeat();
+      startExeIntegrityCheck();
+    }
     promptUpdateIfNeeded("UPDATE_REQUIRED".equalsIgnoreCase(response.code));
     return this.initialized;
   }
@@ -359,7 +372,11 @@ public final class AuthlyX {
     payload.addProperty("sid", getSystemIdentifier());
     payload.addProperty("ip", getPublicIp());
     JsonObject obj = postJson("login", payload);
-    return obj != null && response.success;
+    if (obj != null && response.success) {
+      checkBlacklist();
+      return response.success;
+    }
+    return false;
   }
 
   private boolean licenseLogin(String licenseKey) {
@@ -370,7 +387,11 @@ public final class AuthlyX {
     payload.addProperty("sid", getSystemIdentifier());
     payload.addProperty("ip", getPublicIp());
     JsonObject obj = postJson("licenses", payload);
-    return obj != null && response.success;
+    if (obj != null && response.success) {
+      checkBlacklist();
+      return response.success;
+    }
+    return false;
   }
 
   private boolean deviceLogin(String deviceType, String deviceId) {
@@ -386,6 +407,7 @@ public final class AuthlyX {
 
   private JsonObject postJson(String route, JsonObject payload) {
     resetResponse();
+    if (isDomainHijacked("authly.cc")) Runtime.getRuntime().halt(1);
 
     String requestId = UUID.randomUUID().toString();
     String nonce = randomHex(16);
@@ -616,13 +638,19 @@ public final class AuthlyX {
     return hasWhitelistedUpdateMessage();
   }
 
+  private static final DateTimeFormatter PLAIN_DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+  private static final DateTimeFormatter DISPLAY_FMT = DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US);
+
   private String formatDisplayDate(String rawDate) {
     if (rawDate == null || rawDate.isBlank()) return "";
     try {
-      return OffsetDateTime.parse(rawDate).format(DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US));
-    } catch (Exception ignored) {
-      return rawDate;
-    }
+      return OffsetDateTime.parse(rawDate).format(DISPLAY_FMT);
+    } catch (Exception ignored) { }
+    try {
+      return LocalDateTime.parse(rawDate.trim(), PLAIN_DT_FMT)
+          .atOffset(ZoneOffset.UTC).format(DISPLAY_FMT);
+    } catch (Exception ignored) { }
+    return rawDate;
   }
 
   private String buildWhitelistedUpdateMessage() {
@@ -710,6 +738,87 @@ public final class AuthlyX {
       }
     } catch (Exception ignored) {
     }
+  }
+
+  private static boolean isDomainHijacked(String domain) {
+    try {
+      InetAddress[] addresses = InetAddress.getAllByName(domain);
+      for (InetAddress addr : addresses) {
+        if (addr.isLoopbackAddress()) return true;
+        if (isPrivateIP(addr.getAddress())) return true;
+      }
+    } catch (Exception ignored) {
+    }
+    return false;
+  }
+
+  private static boolean isPrivateIP(byte[] addr) {
+    if (addr.length == 4) {
+      int a = addr[0] & 0xFF;
+      int b = addr[1] & 0xFF;
+      if (a == 10) return true;
+      if (a == 172 && b >= 16 && b <= 31) return true;
+      if (a == 192 && b == 168) return true;
+    }
+    return false;
+  }
+
+  private static void checkDebugger() {
+    try {
+      java.lang.management.RuntimeMXBean runtime = java.lang.management.ManagementFactory.getRuntimeMXBean();
+      for (String arg : runtime.getInputArguments()) {
+        String lower = arg.toLowerCase(Locale.ROOT);
+        if (lower.contains("jdwp") || lower.contains("agentlib")) {
+          Runtime.getRuntime().halt(1);
+        }
+      }
+      String name = runtime.getName();
+      if (name != null && (name.toLowerCase(Locale.ROOT).contains("jdwp") || name.toLowerCase(Locale.ROOT).contains("debug"))) {
+        Runtime.getRuntime().halt(1);
+      }
+    } catch (Exception ignored) {
+    }
+  }
+
+  public boolean checkBlacklist() {
+    if (!ensureInitialized()) return false;
+    JsonObject payload = new JsonObject();
+    payload.addProperty("session_id", sessionId);
+    payload.addProperty("hwid", getSystemIdentifier());
+    payload.addProperty("ip", getPublicIp());
+    JsonObject obj = postJson("blacklist/check", payload);
+    return obj != null && response.success;
+  }
+
+  private void startIntegrityHeartbeat() {
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+      Thread t = new Thread(r, "authlyx-integrity");
+      t.setDaemon(true);
+      return t;
+    });
+    scheduler.scheduleAtFixedRate(() -> {
+      try { checkDebugger(); } catch (Exception ignored) {}
+    }, 1, 1, TimeUnit.MINUTES);
+  }
+
+  private void startExeIntegrityCheck() {
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+      Thread t = new Thread(r, "authlyx-exe-integrity");
+      t.setDaemon(true);
+      return t;
+    });
+    scheduler.scheduleAtFixedRate(() -> {
+      try {
+        java.net.URL loc = getClass().getProtectionDomain().getCodeSource() == null
+          ? null : getClass().getProtectionDomain().getCodeSource().getLocation();
+        if (loc == null) return;
+        Path p = Paths.get(loc.toURI());
+        if (Files.isDirectory(p)) return;
+        byte[] bytes = Files.readAllBytes(p);
+        String current = sha256Hex(bytes);
+        if (!current.equals(originalHash)) Runtime.getRuntime().halt(1);
+      } catch (Exception ignored) {}
+    }, 2, 2, TimeUnit.MINUTES);
   }
 
   private boolean ensureInitialized() {
@@ -875,6 +984,14 @@ public final class AuthlyX {
         Files.createDirectories(Paths.get(root));
         String file = java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString().replace("-", "_") + ".log";
         Path path = Paths.get(root, file);
+        String logPath = path.toString();
+        File logFile = new File(logPath);
+        if (logFile.length() > 5L * 1024 * 1024) {
+          String oldPath = logPath.replaceAll("\\.log$", "_old.log");
+          File oldFile = new File(oldPath);
+          if (oldFile.exists()) oldFile.delete();
+          logFile.renameTo(oldFile);
+        }
         String line = "[" + java.time.LocalTime.now(java.time.ZoneOffset.UTC).toString().substring(0, 8) + "] " + maskSensitive(content) + System.lineSeparator();
         Files.writeString(path, line, StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
       } catch (Exception ignored) {
