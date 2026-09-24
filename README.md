@@ -12,7 +12,10 @@ The SDK supports:
 
 ## Install
 
-This example project uses Maven and `gson`.
+This example project uses Maven, `gson` 2.11.0 and `bcprov-jdk18on` 1.86.
+Bouncy Castle provides Ed25519 response verification on Java 11. The SDK uses
+it directly without registering a global security provider or changing TLS trust.
+When copying `AuthlyX.java` into another project, include both dependencies.
 
 ## Quick Start
 
@@ -176,4 +179,3 @@ AuthlyXApp.SendChat("Hello world", "general");
 String chats = AuthlyXApp.GetChats("general");
 System.out.println(chats);
 ```
-

@@ -5,7 +5,7 @@
 
   <groupId>cc.authlyx</groupId>
   <artifactId>authlyx-java-example</artifactId>
-  <version>1.0.0</version>
+  <version>2.4.0</version>
   <name>AuthlyX Java Example</name>
 
   <properties>
@@ -16,6 +16,11 @@
 
   <dependencies>
     <dependency>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bcprov-jdk18on</artifactId>
+      <version>1.86</version>
+    </dependency>
+    <dependency>
       <groupId>com.google.code.gson</groupId>
       <artifactId>gson</artifactId>
       <version>2.11.0</version>
@@ -23,6 +28,7 @@
   </dependencies>
 
   <build>
+    <sourceDirectory>${project.basedir}</sourceDirectory>
     <plugins>
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
@@ -35,4 +41,3 @@
     </plugins>
   </build>
 </project>
-

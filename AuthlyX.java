@@ -1,8 +1,9 @@
-// AuthlyX SDK Version 2.2
+// AuthlyX SDK V2.4
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -45,6 +46,82 @@ import javax.net.ssl.*;
 import javax.swing.JOptionPane;
 
 public final class AuthlyX {
+  private static final java.security.Provider SIGNATURE_PROVIDER = new BouncyCastleProvider();
+
+  static final class PinnedTrustManager extends X509ExtendedTrustManager {
+    private final X509ExtendedTrustManager delegate;
+    PinnedTrustManager(X509ExtendedTrustManager delegate) { this.delegate = delegate; }
+
+    private void checkPins(X509Certificate[] chain, String host) throws java.security.cert.CertificateException {
+      if (host == null) throw new java.security.cert.CertificateException("Missing TLS peer hostname");
+      if (!"authly.cc".equalsIgnoreCase(host.replaceFirst("\\.$", ""))) return;
+      try {
+
+        java.util.Set<java.security.cert.TrustAnchor> anchors = new java.util.HashSet<>();
+        for (X509Certificate issuer : delegate.getAcceptedIssuers()) {
+          anchors.add(new java.security.cert.TrustAnchor(issuer, null));
+        }
+        java.security.cert.X509CertSelector target = new java.security.cert.X509CertSelector();
+        target.setCertificate(chain[0]);
+        java.security.cert.PKIXBuilderParameters parameters = new java.security.cert.PKIXBuilderParameters(anchors, target);
+        parameters.setMaxPathLength(-1);
+
+        parameters.setRevocationEnabled(false);
+        parameters.addCertStore(java.security.cert.CertStore.getInstance("Collection",
+            new java.security.cert.CollectionCertStoreParameters(java.util.Arrays.asList(chain))));
+        java.security.cert.PKIXCertPathBuilderResult path = (java.security.cert.PKIXCertPathBuilderResult)
+            java.security.cert.CertPathBuilder.getInstance("PKIX").build(parameters);
+        java.util.List<java.security.cert.Certificate> verified = new java.util.ArrayList<>(path.getCertPath().getCertificates());
+        if (path.getTrustAnchor().getTrustedCert() != null) verified.add(path.getTrustAnchor().getTrustedCert());
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        for (java.security.cert.Certificate cert : verified) {
+          StringBuilder fingerprint = new StringBuilder();
+          for (byte b : digest.digest(cert.getEncoded())) fingerprint.append(String.format("%02X", b & 0xff));
+          String pin = fingerprint.toString();
+          if (pin.equals("1DFC1605FBAD358D8BC844F76D15203FAC9CA5C1A79FD4857FFAF2864FBEBF96") ||
+              pin.equals("76B27B80A58027DC3CF1DA68DAC17010ED93997D0B603E2FADBE85012493B5A7")) return;
+        }
+      } catch (java.security.GeneralSecurityException e) {
+        throw new java.security.cert.CertificateException(e);
+      }
+      throw new java.security.cert.CertificateException("AuthlyX TLS certificate chain does not match a trusted pin");
+    }
+
+    public X509Certificate[] getAcceptedIssuers() { return delegate.getAcceptedIssuers(); }
+    public void checkClientTrusted(X509Certificate[] c, String a) throws java.security.cert.CertificateException { delegate.checkClientTrusted(c, a); }
+    public void checkClientTrusted(X509Certificate[] c, String a, java.net.Socket s) throws java.security.cert.CertificateException { delegate.checkClientTrusted(c, a, s); }
+    public void checkClientTrusted(X509Certificate[] c, String a, SSLEngine e) throws java.security.cert.CertificateException { delegate.checkClientTrusted(c, a, e); }
+    public void checkServerTrusted(X509Certificate[] c, String a) throws java.security.cert.CertificateException {
+      delegate.checkServerTrusted(c, a);
+      throw new java.security.cert.CertificateException("TLS peer hostname required for pin validation");
+    }
+    public void checkServerTrusted(X509Certificate[] c, String a, SSLEngine e) throws java.security.cert.CertificateException {
+      delegate.checkServerTrusted(c, a, e);
+      checkPins(c, e.getPeerHost());
+    }
+    public void checkServerTrusted(X509Certificate[] c, String a, java.net.Socket s) throws java.security.cert.CertificateException {
+      delegate.checkServerTrusted(c, a, s);
+      SSLSession session = s instanceof SSLSocket ? ((SSLSocket) s).getHandshakeSession() : null;
+      checkPins(c, session == null ? null : session.getPeerHost());
+    }
+  }
+
+  static SSLContext pinnedSslContext() {
+    try {
+      TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+      factory.init((java.security.KeyStore) null);
+      for (TrustManager manager : factory.getTrustManagers()) {
+        if (manager instanceof X509ExtendedTrustManager) {
+          SSLContext context = SSLContext.getInstance("TLS");
+          context.init(null, new TrustManager[] { new PinnedTrustManager((X509ExtendedTrustManager) manager) }, null);
+          return context;
+        }
+      }
+      throw new IllegalStateException("Platform X509ExtendedTrustManager unavailable");
+    } catch (java.security.GeneralSecurityException e) {
+      throw new IllegalStateException("Cannot initialize AuthlyX TLS pinning", e);
+    }
+  }
   public static final class ResponseStruct {
     public boolean success = false;
     public String message = "";
@@ -125,7 +202,7 @@ public final class AuthlyX {
     this.apiBase = (apiBase == null || apiBase.trim().isEmpty())
       ? "https://authly.cc/api/v2"
       : apiBase.trim().replaceAll("/+$", "");
-    this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    this.http = HttpClient.newBuilder().sslContext(pinnedSslContext()).connectTimeout(Duration.ofSeconds(10)).build();
     checkDebugger();
   }
 
@@ -147,6 +224,7 @@ public final class AuthlyX {
     payload.addProperty("version", version);
     payload.addProperty("secret", secret);
     payload.addProperty("hash", applicationHash == null ? "" : applicationHash);
+    payload.addProperty("ip", getPublicIp());
 
     JsonObject obj = postJson("init", payload);
     if (obj == null) return false;
@@ -476,8 +554,8 @@ public final class AuthlyX {
 
     try {
       byte[] keyBytes = Base64.getDecoder().decode(serverPublicKeyDerBase64);
-      PublicKey publicKey = KeyFactory.getInstance("Ed25519").generatePublic(new X509EncodedKeySpec(keyBytes));
-      Signature verifier = Signature.getInstance("Ed25519");
+      PublicKey publicKey = KeyFactory.getInstance("Ed25519", SIGNATURE_PROVIDER).generatePublic(new X509EncodedKeySpec(keyBytes));
+      Signature verifier = Signature.getInstance("Ed25519", SIGNATURE_PROVIDER);
       verifier.initVerify(publicKey);
       String payload = signatureTs + "\n" + requestId + "\n" + nonce + "\n" + canonicalBody;
       verifier.update(payload.getBytes(StandardCharsets.UTF_8));
