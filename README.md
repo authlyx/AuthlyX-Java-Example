@@ -1,181 +1,98 @@
 # AuthlyX Java SDK
 
-This is a Java authentication SDK for desktop and Java applications that want simple integration with the AuthlyX API.
+Official Java SDK and console example for AuthlyX V3 (3.0.0 beta).
 
-This folder is primarily for SDK users. The sample app here is only a reference example to help you integrate faster.
+Full documentation: https://docs.authlyx.dev
 
-## Supported Targets
+## Requirements
 
-The SDK supports:
+- Windows
+- Java 17 or newer
+- Maven
 
-- Java 11+
+## Run the example
 
-## Install
-
-This example project uses Maven, `gson` 2.11.0 and `bcprov-jdk18on` 1.86.
-Bouncy Castle provides Ed25519 response verification on Java 11. The SDK uses
-it directly without registering a global security provider or changing TLS trust.
-When copying `AuthlyX.java` into another project, include both dependencies.
-
-## Quick Start
+Put your app key and version in `src/main/java/app/authlyx/example/Main.java`:
 
 ```java
-public static AuthlyX AuthlyXApp = new AuthlyX(
-  "12345678",
-  "MYAPP",
-  "1.0.0",
-  "your-secret"
-);
-
-/*
-Optional:
-- Set debug to false to disable SDK logs.
-- Set api to your custom domain, for example: https://example.com/api/v2
-*/
+try (AuthlyX app = new AuthlyX("YOUR_APP_KEY", "1.0.0"))
 ```
 
-Then initialize:
+Then run it:
 
-```java
-AuthlyXApp.Init();
+```bat
+mvn compile exec:java
 ```
 
-## Optional Parameters
+You can find your app key under your app's credentials in the [dashboard](https://dash.authlyx.dev).
 
-```java
-public static AuthlyX AuthlyXApp = new AuthlyX(
-  "12345678",
-  "MYAPP",
-  "1.0.0",
-  "your-secret",
-  false,
-  "https://example.com/api/v2"
-);
+## Add it to your own project
+
+Copy `src/main/java/app/authlyx/AuthlyX.java` into your project and add these dependencies:
+
+```xml
+<dependency>
+  <groupId>com.fasterxml.jackson.core</groupId>
+  <artifactId>jackson-databind</artifactId>
+  <version>2.22.4</version>
+</dependency>
+<dependency>
+  <groupId>org.bouncycastle</groupId>
+  <artifactId>bcprov-jdk18on</artifactId>
+  <version>1.86</version>
+</dependency>
 ```
 
-### Available options
-
-- `debug`
-  - Default: `true`
-  - Set `false` to disable SDK logs
-
-- `api`
-  - Default: `https://authly.cc/api/v2`
-  - Use this for your custom domain
-
-## Available Methods
-
-- `Init()`
-- `Login(identifier, password = null, deviceType = null)`
-- `Register(username, password, licenseKey, email = "")`
-- `ChangePassword(oldPassword, newPassword)`
-- `ExtendTime(username, licenseKey)`
-- `GetVariable(key)`
-- `SetVariable(key, value)`
-- `Log(message)`
-- `GetChats(channelName)`
-- `SendChat(message, channelName = "general")`
-- `ValidateSession()`
-
-## Authentication Example
-
 ```java
-// Username + password
-AuthlyXApp.Login("username", "password");
+import app.authlyx.AuthlyX;
 
-// License key only
-AuthlyXApp.Login("XXXXX-XXXXX-XXXXX-XXXXX-XXXXX");
-
-// Device login
-AuthlyXApp.Login("YOUR_MOTHERBOARD_ID", null, "motherboard");
-```
-
-The SDK routes `Login(...)` automatically:
-
-- `password + identifier` for username login
-- `identifier only` for license login
-- `deviceType + identifier` for device login
-
-## Username Login Example
-
-```java
-AuthlyXApp.Login("username", "password");
-
-if (AuthlyXApp.response.success) {
-  System.out.println("Login success");
-  System.out.println(AuthlyXApp.userData.Username);
-  System.out.println(AuthlyXApp.userData.SubscriptionLevel);
-} else {
-  System.out.println(AuthlyXApp.response.message);
+try (AuthlyX app = new AuthlyX("YOUR_APP_KEY", "1.0.0")) {
+    app.initialize().join();
 }
 ```
 
-`userData.SubscriptionLevel` is populated automatically after username, license, and device authentication flows.
+Every method returns a `CompletableFuture`. Calling `.join()` waits for the reply, so in a Swing or JavaFX app do that off the UI thread, or use `thenAccept`.
 
-## License Login Example
-
-```java
-AuthlyXApp.Login("XXXXX-XXXXX-XXXXX-XXXXX-XXXXX");
-
-if (AuthlyXApp.response.success) {
-  System.out.println("License login success");
-} else {
-  System.out.println(AuthlyXApp.response.message);
-}
-```
-
-## Device Login Example
-
-### Motherboard
+## Signing in
 
 ```java
-AuthlyXApp.Login("YOUR_MOTHERBOARD_ID", null, "motherboard");
-
-if (AuthlyXApp.response.success) {
-  System.out.println("Motherboard login success");
-} else {
-  System.out.println(AuthlyXApp.response.message);
-}
+app.login("YOUR_USERNAME", "YOUR_PASSWORD").join();
+app.login("YOUR_LICENSE_KEY").join();
+app.deviceLogin().join();
 ```
 
-### Processor
+Device login signs in the current Windows user without a form. The device has to be approved in your app first. See [Device login](https://docs.authlyx.dev/guides/device-login).
+
+After signing in, the account details are in `userData`:
 
 ```java
-AuthlyXApp.Login("YOUR_PROCESSOR_ID", null, "processor");
-
-if (AuthlyXApp.response.success) {
-  System.out.println("Processor login success");
-} else {
-  System.out.println(AuthlyXApp.response.message);
-}
+var user = app.userData;
+String username = user.path("name").asText("");
+String plan = user.path("plan").asText("");
+String expiry = user.path("expiry").asText("");
 ```
 
-## Variable Example
+Every method has its own page with examples under [SDK methods](https://docs.authlyx.dev/sdks/methods/login).
+
+## Offline access
+
+Once someone is signed in, saving offline access stores a signed permit on that PC:
 
 ```java
-AuthlyXApp.SetVariable("theme", "dark");
-
-String value = AuthlyXApp.GetVariable("theme");
-System.out.println(value);
+app.saveOfflineAccess().join();
+boolean available = app.hasOfflineAccess().join();
 ```
 
-## Change Password Example
+If they open your app later without internet, they sign in with the same username and password or license key, and the SDK checks it against the saved permit. Each permit belongs to one app and one account, and signing out removes it. More in [Offline access](https://docs.authlyx.dev/guides/offline).
 
-```java
-AuthlyXApp.ChangePassword("oldpass", "newpass");
+## Errors
 
-if (AuthlyXApp.response.success) {
-  System.out.println("Password changed successfully");
-} else {
-  System.out.println(AuthlyXApp.response.message);
-}
-```
+When a request fails, the future completes with an `AuthlyX.SdkException` that has a `code` and a message you can show to the user. With `.join()` it arrives wrapped in a `CompletionException`, so read `getCause()` like the example does. All codes are listed in [Errors](https://docs.authlyx.dev/api-reference/errors).
 
-## Chat Example
+## Coming from 2.4
 
-```java
-AuthlyXApp.SendChat("Hello world", "general");
+V3 is a new SDK, not a drop-in update. Apps use an app key instead of the old owner ID, app name and secret, and the method names changed. Read [Move from V2 to V3](https://docs.authlyx.dev/api-reference/migration) before you switch.
 
-String chats = AuthlyXApp.GetChats("general");
-System.out.println(chats);
-```
+## License
+
+MIT. See `LICENSE.txt`.

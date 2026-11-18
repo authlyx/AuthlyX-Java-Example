@@ -1,6 +1,5 @@
-/target/
-/*.iml
-/.idea/
-/.vscode/
-*.log
+build/
+target/
+lib/
+dependency-versions.json
 *.class
